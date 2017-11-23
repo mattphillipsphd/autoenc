@@ -1,0 +1,17 @@
+{
+  "graph" :
+  {
+    "bottleneck"              : [100],
+    "conv_filter_bank_size"   : [32, 32, 32, 16, 8],
+    "conv_kernel_size"        : [3, 3, 3, 3, 3],
+    "input_shape"             : [72, 72, 3]
+  },
+  
+  "train" :
+  {
+    "batch_size"            : 512,
+    "learning_rate"         : 0.001,
+    "num_epochs"            : 50,
+    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/logs/cnn_autoenc"
+  }
+}
