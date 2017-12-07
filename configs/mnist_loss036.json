@@ -1,0 +1,29 @@
+{
+  "generator" : "mnist",
+  
+  "graph" :
+  {
+    "bottleneck"              : [10],
+    "conv_filter_bank_size"   : [64, 64, 32, 16],
+    "conv_kernel_size"        : [3, 3, 3, 3],
+    "input_shape"             : [28, 28, 1],
+    "max_pool_size"           : [3,2,2,2],
+    "max_pool_stride"         : [3,2,2,2]
+  },
+  
+  "train" :
+  {
+    "batch_size"            : 128,
+    "data_location"         : "J:/Datasets/MNIST",
+    "learning_rate"         : 0.01,
+    "num_epochs"            : 10,
+    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/logs/cnn_autoenc/mnist",
+    "optimizer"             : "momentum",
+    "momentum"              : 0.9
+  },
+  
+  "test" :
+  {
+    "_comment"              : "Loss with this config: 0.036"
+  }
+}

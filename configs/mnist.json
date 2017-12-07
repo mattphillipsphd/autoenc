@@ -1,17 +1,31 @@
 {
+  "generator" : "mnist",
+  
   "graph" :
   {
     "bottleneck"              : [10],
-    "conv_filter_bank_size"   : [64, 32, 16],
+    "conv_filter_bank_size"   : [10, 10, 10],
     "conv_kernel_size"        : [3, 3, 3],
-    "input_shape"             : [28, 28, 1]
+    "conv_stride"             : [1, 1, 1],
+    "input_shape"             : [28, 28, 1],
+    "max_pool_size"           : [2,2,2],
+    "max_pool_stride"         : [2,2,2],
+    "use_bottleneck"           : false
   },
   
   "train" :
   {
-    "batch_size"            : 512,
-    "learning_rate"         : 0.001,
+    "batch_size"            : 128,
+    "data_location"         : "J:/Datasets/MNIST",
+    "learning_rate"         : 0.01,
     "num_epochs"            : 10,
-    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/logs/cnn_autoenc/mnist"
+    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/tf_graphs/cnn_autoenc/mnist",
+    "optimizer"             : "adam",
+    "momentum"              : 0.9
+  },
+  
+  "test" :
+  {
+    "_comment"              : "Loss with this config: <fill this in>"
   }
 }

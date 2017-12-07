@@ -7,6 +7,7 @@ Created on Mon Nov 20 19:29:15 2017
 
 import argparse
 import json
+import math
 import matplotlib.pyplot as plt
 import numpy as np
 import os
@@ -54,14 +55,18 @@ class InputMnist(InputBase):
     def next_test_batch(self):
         if not self._is_initialized:
             raise RuntimeError("Generator not initialized")
-        batch = self._generator.test.next_batch( self._batch_size )
-        return batch[0].reshape([-1] + self._input_shape)
+        mean_img = np.mean(self._generator.test.images, axis=0)
+        batch = self._generator.test.next_batch( self._batch_size )[0]
+        batch = [(img - mean_img).reshape(self._input_shape) for img in batch]
+        return batch
         
     def next_train_batch(self):
         if not self._is_initialized:
             raise RuntimeError("Generator not initialized")
-        batch = self._generator.train.next_batch( self._batch_size )
-        return batch[0].reshape([-1] + self._input_shape)
+        mean_img = np.mean(self._generator.train.images, axis=0)
+        batch = self._generator.train.next_batch( self._batch_size )[0]
+        batch = [(img - mean_img).reshape(self._input_shape) for img in batch]
+        return batch
     
     def num_test_inputs(self):
         return self._generator.test.num_examples
@@ -188,7 +193,49 @@ def fill_cfg_defaults(cfg):
         cfg["conv_kernel_size"] = [3] * num_conv
     if "max_pool_stride" not in cfg:
         cfg["max_pool_stride"] = [2] * num_conv
+    if "use_bottleneck" not in cfg:
+        cfg["use_bottleneck"] = True
 
+
+def get_log_file_name(cfg):
+    file_ct = 0
+    logdir = cfg["logging_dir"]
+    lr = cfg["learning_rate"]
+    opt = cfg["optimizer"]
+    found_fn = False
+    while not found_fn:
+        found_fn = True
+        for f in os.listdir(logdir):
+            proto_fn = "%(opt)s_%(lr).4f_%(file_ct)d" % locals()
+            if f == proto_fn:
+                file_ct += 1
+                found_fn = False
+                break
+    return pj(logdir, proto_fn)
+
+
+def lrelu(x, leak=0.2, name="lrelu"):
+    """Leaky rectifier.
+
+    Parameters
+    ----------
+    x : Tensor
+        The tensor to apply the nonlinearity to.
+    leak : float, optional
+        Leakage parameter.
+    name : str, optional
+        Variable scope to use.
+
+    Returns
+    -------
+    x : Tensor
+        Output of the nonlinearity.
+    """
+    with tf.variable_scope(name):
+        f1 = 0.5 * (1 + leak)
+        f2 = 0.5 * (1 - leak)
+        return f1 * x + f2 * abs(x)
+    
 
 def make_bottleneck(conv_last, cfg):
     bottleneck = cfg["bottleneck"]
@@ -225,20 +272,27 @@ def make_conv_layers(x, cfg):
             
             kernel_shape = [kernel_size, kernel_size, num_channels, num_filters]
             print("kernel_shape:", kernel_shape)
-            W = tf.get_variable(name+"_W", 
-                                kernel_shape, 
-                                initializer=tf.contrib.layers.xavier_initializer())
+            W = tf.Variable(
+                tf.random_uniform(kernel_shape,
+                    -1.0 / math.sqrt(num_channels),
+                    1.0 / math.sqrt(num_channels)))
+#            W = tf.get_variable(name+"_W", 
+#                                kernel_shape, 
+#                                initializer=tf.contrib.layers.xavier_initializer(uniform=True))
             #tf.layers.conv2d uses the glorot_uniform_initializer
             
-            b = tf.get_variable(name+"_b", 
-                                [num_filters],
-                                initializer=tf.zeros_initializer())
-            y = tf.nn.conv2d(t_in,
-                             W,
-                             [1, conv_stride, conv_stride, 1],
-                             padding="SAME") + b
+            b = tf.Variable(tf.zeros([num_filters]), name=name+"_b")
+            
+            y = tf.add( tf.nn.conv2d(t_in,
+                                     W,
+                                     strides=[1, conv_stride, conv_stride, 1],
+                                     padding="SAME"), b)
             print("y:", y.shape)
-            mp = tf.layers.max_pooling2d(y,
+            
+            act = tf.nn.relu(y, name=name+"_relu")
+            print("act:", act.shape)
+            
+            mp = tf.layers.max_pooling2d(act,
                                         pool_size,
                                         strides=pool_stride,
                                         padding="SAME",
@@ -246,25 +300,24 @@ def make_conv_layers(x, cfg):
     
             tf.summary.histogram(mp.name[:-2], mp)
             print("mp:", mp.shape)
-            
-            act = tf.nn.relu(mp, name=name+"_relu")
-            print("act:", act.shape)
-            return mp
+            return mp,W
     
     conv_filters = cfg["conv_filter_bank_size"]
     num_conv = len(conv_filters)
     t_in = x
+    Ws = []
     layer_shapes = [t_in.shape]
     for i in range(num_conv):
-        t_in = make_conv_layer(t_in, cfg, i)
+        t_in,W = make_conv_layer(t_in, cfg, i)
         layer_shapes.append(t_in.shape)
+        Ws.append(W)
         
-    return t_in,layer_shapes
+    return t_in,layer_shapes,Ws
 
 
-def make_deconv_layers(bn, layer_shapes, cfg):
+def make_deconv_layers(bn, layer_shapes, Ws, cfg):
     # NB, for deconvolution indexing starts from the back
-    def make_deconv_layer(t_in, layer_shape, cfg, index):
+    def make_deconv_layer(t_in, layer_shape, W, cfg, index):
         name = "deconv_layer_" + str(i)
         with tf.name_scope(name):
             in_channels = int(t_in.shape[3])
@@ -275,20 +328,27 @@ def make_deconv_layers(bn, layer_shapes, cfg):
 
             ht = int(layer_shape[1])
             wd = int(layer_shape[2])
+#            ht = int(W.shape[1])
+#            wd = int(W.shape[2])
             upsample = tf.image.resize_nearest_neighbor(t_in, (ht, wd))
+#            upsample = t_in
             
             kernel_shape = [kernel_size, kernel_size, in_channels, out_channels]
             W = tf.get_variable(name+"_W",
                                 kernel_shape,
-                                initializer=tf.contrib.layers.xavier_initializer())        
-            b = tf.get_variable(name+"_b",
-                                [out_channels],
-                                initializer=tf.zeros_initializer())
+                                initializer=tf.contrib.layers.xavier_initializer())   
+            print("W_in: ", W.shape, ", W: ", kernel_shape, "upsample: ", upsample.shape)
+           
+            b = tf.Variable(tf.zeros([out_channels]), name=name+"_b")
         
-            deconv = tf.nn.conv2d(upsample, 
-                                  W, 
-                                  [1, conv_stride, conv_stride, 1],
-                                  "SAME") + b
+            deconv = tf.add( tf.nn.conv2d(upsample, #_transpose(upsample, 
+                                            W, 
+#                                            tf.stack([tf.shape(t_in)[0],
+#                                                      layer_shape[1],
+#                                                      layer_shape[2],
+#                                                      layer_shape[3]]),
+                                            strides=[1, conv_stride, conv_stride, 1],
+                                            padding="SAME"), b)
             print("deconv: ", deconv.shape)
     
             act = tf.nn.relu(deconv, name=name+"_relu")
@@ -305,7 +365,7 @@ def make_deconv_layers(bn, layer_shapes, cfg):
     cfg["conv_filter_bank_size"] = [ cfg["input_shape"][2] ] + cfg["conv_filter_bank_size"]
     for i in range(num_conv):
         idx = num_conv - i - 1
-        t_in = make_deconv_layer(t_in, layer_shapes[idx], cfg, idx)
+        t_in = make_deconv_layer(t_in, layer_shapes[idx], Ws[idx], cfg, idx)
         
     return t_in
     
@@ -321,9 +381,13 @@ def make_fc_layer(t_in, fan_out, name):
     
     
 def make_graph(x, cfg):
-    conv_last,layer_shapes = make_conv_layers(x, cfg)
-    bn_last = make_bottleneck(conv_last, cfg)
-    deconv_last = make_deconv_layers(bn_last, layer_shapes, cfg)
+    conv_last,layer_shapes,Ws = make_conv_layers(x, cfg)
+    if cfg["use_bottleneck"]:
+        bn_last = make_bottleneck(conv_last, cfg)
+    else:
+        bn_last = conv_last
+    print("Is using bottleneck layers: ", cfg["use_bottleneck"])
+    deconv_last = make_deconv_layers(bn_last, layer_shapes, Ws, cfg)
     return deconv_last
     
     
@@ -336,21 +400,42 @@ def make_input(cfg):
     
 def make_training_op(out, target, cfg):    
     with tf.name_scope("conv_mse"):
-        sq_error = tf.reduce_mean(np.square(out - target), axis=1)
-        cost = tf.reduce_mean( sq_error, name="cost" )
+        cost = tf.reduce_mean( tf.square(out - target), name="cost" )
     
         tf.summary.scalar("cost", cost)
         
     with tf.name_scope("conv_opt"):
         lr = cfg["learning_rate"]
-        optimizer = tf.train.AdamOptimizer(learning_rate=lr)
-    #    optimizer = tf.train.RMSPropOptimizer(learning_rate=conf["lr"])
-    #    optimizer = tf.train.MomentumOptimizer(learning_rate=conf["lr"], momentum=conf["momentum"])
-    #    optimizer = tf.train.GradientDescentOptimizer(learning_rate=conf["lr"])
+        if cfg["optimizer"].lower() == "momentum":
+            optimizer = tf.train.MomentumOptimizer(learning_rate=lr, momentum=cfg["momentum"])
+        elif cfg["optimizer"].lower() == "adam":
+            optimizer = tf.train.AdamOptimizer(learning_rate=lr)
+        elif cfg["optimizer"].lower() == "rmsprop":
+            optimizer = tf.train.RMSPropOptimizer(learning_rate=lr)
+        elif cfg["optimizer"].lower() == "gd":
+            optimizer = tf.train.GradientDescentOptimizer(learning_rate=lr)
+        else:
+            raise RuntimeError("Unrecognized optimizer")
         training_op = optimizer.minimize(cost)
         
     return training_op,cost
 
+
+def open_config(config_fn : str, data_loc : str):
+    with open(config_fn) as fp:
+        cfg = json.load(fp)
+        
+        if len(data_loc)!=0:
+            cfg["train"]["data_location"] = data_loc 
+        
+        fill_cfg_defaults(cfg["graph"])
+        check_config(cfg["graph"]) # TODO Extend to all variables
+        print("Configuration:")
+        for key, val in cfg.items():
+            print("\t" + key + ": " + str(val))
+            
+    return cfg
+    
 
 def train_model(input_gen, model, training_op, x, cost, cfg):
     input_gen.initialize(cfg["graph"]["input_shape"],
@@ -365,7 +450,8 @@ def train_model(input_gen, model, training_op, x, cost, cfg):
         sess.run(tf.global_variables_initializer())
     
         merged = tf.summary.merge_all()
-        train_writer = tf.summary.FileWriter(cfg["logging_dir"], sess.graph)
+        logfile = get_log_file_name(cfg)
+        train_writer = tf.summary.FileWriter(logfile, sess.graph)
     
         for i in range(cfg["num_epochs"]):
             train_costs = []
@@ -391,15 +477,7 @@ def train_model(input_gen, model, training_op, x, cost, cfg):
             axes[1].imshow( np.squeeze(decoded_chip) )
     
 
-def create_and_train_model(config_fn : str, input_generator : InputBase):
-    with open(config_fn) as fp:
-        cfg = json.load(fp)
-        fill_cfg_defaults(cfg["graph"])
-        check_config(cfg["graph"]) # TODO Extend to all variables
-        print("Configuration:")
-        for key, val in cfg.items():
-            print("\t" + key + ": " + str(val))
-    
+def create_and_train_model(cfg : dict, input_generator : InputBase):
     tf.reset_default_graph()
     x = make_input(cfg["graph"])
     graph = make_graph(x, cfg["graph"])
@@ -409,17 +487,14 @@ def create_and_train_model(config_fn : str, input_generator : InputBase):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config", default="C:/Users/Matt/Documents/nbs/autoenc/configs/planetfile.json")
-    parser.add_argument("-g", "--generator", default="mnist")
-    parser.add_argument("-d", "--data-dir", default="J:/Datasets/MNIST")
+    parser.add_argument("-c", "--config", default="C:/Users/Matt/Documents/nbs/autoenc/configs/mnist.json")
+#    parser.add_argument("-c", "--config", default="C:/Users/Matt/Documents/nbs/autoenc/configs/planetfile.json")
+    parser.add_argument("-d", "--data-loc", default="J:/Datasets/MNIST")
     
     args = parser.parse_args()
     
+    cfg = open_config(args.config, args.data_loc)
     
-    RAW_DATA_DIR = "J:/Datasets/Planet/Salinas_001/20171028_190652_1056020_RapidEye-5"
-    RAW_DATA_FILE = "1056020_2017-10-28_RE5_3A_Visual.tif"
-    salinas1 = pj(RAW_DATA_DIR, RAW_DATA_FILE)
-    input_gen = input_generator_factory("planetfile", salinas1)
-
-#    input_gen = input_generator_factory(args.generator, args.data_dir)
-    create_and_train_model(args.config, input_gen)
+    input_gen = input_generator_factory(cfg["generator"], cfg["train"]["data_location"])
+    
+    create_and_train_model(cfg, input_gen)

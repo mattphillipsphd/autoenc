@@ -1,17 +1,22 @@
 {
+  "generator" : "planetfile",
+  
   "graph" :
   {
-    "bottleneck"              : [50],
-    "conv_filter_bank_size"   : [64, 32, 16],
-    "conv_kernel_size"        : [3, 3, 3],
-    "input_shape"             : [48, 48, 3]
+    "bottleneck"              : [30],
+    "conv_filter_bank_size"   : [96, 64, 32, 16],
+    "conv_kernel_size"        : [3, 3, 3, 3],
+    "input_shape"             : [28, 28, 3]
   },
   
   "train" :
   {
     "batch_size"            : 512,
+    "data_location"         : "J:/Datasets/Planet/Salinas_001/20171028_190652_1056020_RapidEye-5/1056020_2017-10-28_RE5_3A_Visual.tif"
     "learning_rate"         : 0.001,
+    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/logs/cnn_autoenc/planetfile",
     "num_epochs"            : 10,
-    "logging_dir"           : "C:/Users/Matt/Documents/nbs/autoenc/logs/cnn_autoenc/planetfile"
+    "optimizer"             : "momentum",
+    "momentum"              : 0.9
   }
 }
