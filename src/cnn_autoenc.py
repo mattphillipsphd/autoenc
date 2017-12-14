@@ -141,12 +141,103 @@ class InputPlanetFile(InputBase):
         return len(self._train_chips)
 
 
+# This class assumes that the images have already been chipped and are in the
+# data_location directory
+class InputAvedai(InputBase):
+    def __init__(self, data_location):
+        InputBase.__init__(self, data_location)
+        self._train_chips = None
+        self._test_chips = None
+        self._train_batch_ct = 0
+        self._test_batch_ct = 0
+       
+    def initialize(self, input_shape, batch_size):
+        self._batch_size = batch_size
+        self._input_shape = input_shape
+        
+        def _shift(img, px_x, px_y):
+            shift_img = np.copy(img)
+            sz = img.shape[0]
+            xbeg = np.max([0, px_x])
+            xend = np.min([sz, sz+px_x])
+            ybeg = np.max([0, px_y])
+            yend = np.min([sz, sz+px_y])
+            xrng = sz - np.abs(px_x)
+            yrng = sz - np.abs(px_y)
+            if px_x>=0 and px_y>=0:
+                shift_img[px_x:sz, px_y:sz, :] = img[xbeg:xend, ybeg:yend, :]
+            elif px_x>=0 and px_y<0:
+                shift_img[px_x:sz, 0:yrng, :] = img[xbeg:xend, ybeg:yend, :]
+            elif px_x<0 and px_y>=0:
+                shift_img[0:xrng, px_y:sz, :] = img[xbeg:xend, ybeg:yend, :]
+            else:
+                shift_img[0:xrng, 0:yrng, :] = img[xbeg:xend, ybeg:yend, :]
+            return shift_img
 
-def input_generator_factory(gen_str, data_dir):
+        chip_list = [f for f in os.listdir(self._data_location) if f.endswith(".png")]
+        chips = []
+        delta = 15
+        for chip in chip_list:
+            img = plt.imread( pj(self._data_location,chip) )
+            chips.append( _shift(img, delta, delta) )
+            chips.append( _shift(img, delta, 0) )
+            chips.append( _shift(img, delta, -delta) )
+            chips.append( _shift(img, 0, delta) )
+            chips.append( _shift(img, 0, -delta) )
+            chips.append( _shift(img, -delta, delta) )
+            chips.append( _shift(img, -delta, 0) )
+            chips.append( _shift(img, -delta, -delta) )
+        np.random.shuffle(chips)
+        
+        trainN = int(round(0.8 * len(chips)))
+        self._train_chips = chips[:trainN]
+        self._test_chips = chips[trainN:]
+        
+        self._is_initialized = True   
+    
+    def next_test_batch(self):
+        if not self._is_initialized:
+            raise RuntimeError("Generator not initialized")
+        N = len(self._test_chips)
+        end_idx = (self._test_batch_ct + 1) * self._batch_size
+        if end_idx > N:
+            self._test_batch_ct = 0
+            end_idx = self._batch_size
+        beg_idx = self._test_batch_ct * self._batch_size
+        batch = self._test_chips[beg_idx : end_idx]
+        self._test_batch_ct += 1
+        return batch
+        
+    def next_train_batch(self):
+        if not self._is_initialized:
+            raise RuntimeError("Generator not initialized")
+        N = len(self._train_chips)
+        end_idx = (self._train_batch_ct + 1) * self._batch_size
+        if end_idx > N:
+            self._train_batch_ct = 0
+            end_idx = self._batch_size
+        beg_idx = self._train_batch_ct * self._batch_size
+        batch = self._train_chips[beg_idx : end_idx]
+        self._train_batch_ct += 1
+        return batch
+    
+    def num_test_inputs(self):
+        return len(self._test_chips)
+        
+    def num_train_inputs(self):
+        return len(self._train_chips)
+
+
+
+
+
+def input_generator_factory(gen_str, data_location):
     if gen_str.lower() == "mnist":
-        return InputMnist(data_dir)
+        return InputMnist(data_location)
     elif gen_str.lower() == "planetfile":
-        return InputPlanetFile(data_dir)
+        return InputPlanetFile(data_location)
+    elif gen_str.lower() == "avedai":
+        return InputAvedai(data_location)
     else:
         raise RuntimeError("Generator not recognized")
 
@@ -188,6 +279,19 @@ def fill_cfg_defaults(cfg):
         cfg["conv_kernel_size"] = [3] * num_conv
     if "max_pool_stride" not in cfg:
         cfg["max_pool_stride"] = [2] * num_conv
+
+
+def get_log_file_dir(cfg):
+    logdir = cfg["logging_dir"]
+    if not os.path.exists(logdir):
+        os.makedirs(logdir)
+    stub = "log_%03d"
+    file_ct = 0
+    logfd = stub % (file_ct)
+    while os.path.exists( pj(logdir, logfd) ):
+        file_ct += 1
+        logfd = stub % (file_ct)
+    return pj(logdir, logfd)
 
 
 def make_bottleneck(conv_last, cfg):
@@ -365,7 +469,7 @@ def train_model(input_gen, model, training_op, x, cost, cfg):
         sess.run(tf.global_variables_initializer())
     
         merged = tf.summary.merge_all()
-        train_writer = tf.summary.FileWriter(cfg["logging_dir"], sess.graph)
+        train_writer = tf.summary.FileWriter(get_log_file_dir(cfg), sess.graph)
     
         for i in range(cfg["num_epochs"]):
             train_costs = []
@@ -389,6 +493,7 @@ def train_model(input_gen, model, training_op, x, cost, cfg):
             fig,axes = plt.subplots(nrows=1, ncols=2)
             axes[0].imshow( np.squeeze(test_batch[i]) )
             axes[1].imshow( np.squeeze(decoded_chip) )
+            fig.savefig("Comparison_" + str(i) + ".png")
     
 
 def create_and_train_model(config_fn : str, input_generator : InputBase):
@@ -409,17 +514,18 @@ def create_and_train_model(config_fn : str, input_generator : InputBase):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-c", "--config", default="C:/Users/Matt/Documents/nbs/autoenc/configs/planetfile.json")
+    parser.add_argument("-c", "--config", 
+	default="C:/Users/Matt/Documents/nbs/autoenc/configs/planetfile.json")
     parser.add_argument("-g", "--generator", default="mnist")
     parser.add_argument("-d", "--data-dir", default="J:/Datasets/MNIST")
     
     args = parser.parse_args()
     
     
-    RAW_DATA_DIR = "J:/Datasets/Planet/Salinas_001/20171028_190652_1056020_RapidEye-5"
-    RAW_DATA_FILE = "1056020_2017-10-28_RE5_3A_Visual.tif"
-    salinas1 = pj(RAW_DATA_DIR, RAW_DATA_FILE)
-    input_gen = input_generator_factory("planetfile", salinas1)
+#    RAW_DATA_DIR = "J:/Datasets/Planet/Salinas_001/20171028_190652_1056020_RapidEye-5"
+#    RAW_DATA_FILE = "1056020_2017-10-28_RE5_3A_Visual.tif"
+#    salinas1 = pj(RAW_DATA_DIR, RAW_DATA_FILE)
+#    input_gen = input_generator_factory("planetfile", salinas1)
 
-#    input_gen = input_generator_factory(args.generator, args.data_dir)
+    input_gen = input_generator_factory(args.generator, args.data_dir)
     create_and_train_model(args.config, input_gen)

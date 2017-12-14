@@ -1,0 +1,17 @@
+{
+  "graph" :
+  {
+    "bottleneck"              : [32],
+    "conv_filter_bank_size"   : [32, 32, 64, 64],
+    "conv_kernel_size"        : [4, 4, 4, 4],
+    "input_shape"             : [64, 64, 3]
+  },
+  
+  "train" :
+  {
+    "batch_size"            : 512,
+    "learning_rate"         : 0.001,
+    "num_epochs"            : 5,
+    "logging_dir"           : "/home/matt.phillips/Training/autoenc/avedai"
+  }
+}
